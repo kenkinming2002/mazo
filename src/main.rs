@@ -1,10 +1,61 @@
 use rand::prelude::*;
+
+use std::io::prelude::*;
 use std::collections::HashSet;
+
+use crossterm::event::*;
+use crossterm::terminal::*;
+
+#[derive(PartialEq, Eq, Hash)]
+struct Wall {
+    position: Vec<usize>,
+    axis: usize,
+}
+
+impl Wall {
+    /// Get the list of walls neighbouring a cell at position.
+    pub fn from_cell(shape: &[usize], position: &[usize]) -> Vec<Wall> {
+        let mut walls = Vec::new();
+        for axis in 0..shape.len() {
+            for sign in [false, true] {
+                let mut position = position.to_vec();
+                if sign {
+                    if position[axis] != 0 {
+                        position[axis] -= 1;
+                    } else {
+                        position[axis] = shape[axis] - 1;
+                    }
+                }
+                walls.push(Wall { position, axis });
+            }
+        }
+        walls
+    }
+
+    /// Get the two cells neighbouring the wall.
+    pub fn get_neighbour_cells(&self, shape: &[usize]) -> [Vec<usize>; 2] {
+        let position1 = self.position.clone();
+
+        let mut position2 = self.position.clone();
+        if position2[self.axis] != shape[self.axis] - 1 {
+            position2[self.axis] += 1;
+        } else {
+            position2[self.axis] = 0;
+        }
+
+        [position1, position2]
+    }
+}
 
 struct Maze {
     shape: Vec<usize>,
+
     start: Vec<usize>,
     end: Vec<usize>,
+
+    position: Vec<usize>,
+    axes: [usize; 2],
+
     walls: Vec<bool>,
 }
 
@@ -12,6 +63,9 @@ impl Maze {
     pub fn new(shape: Vec<usize>) -> Maze {
         let start = vec![0; shape.len()];
         let end = vec![0; shape.len()];
+        let position = vec![0; shape.len()];
+
+        let axes = [0, 1];
 
         let wall_count = shape.iter().product::<usize>() * shape.len();
         let walls = vec![true; wall_count];
@@ -20,6 +74,8 @@ impl Maze {
             shape,
             start,
             end,
+            position,
+            axes,
             walls,
         }
     }
@@ -87,82 +143,134 @@ impl Maze {
         }
     }
 
-    pub fn display2d(&self) {
-        assert_eq!(self.shape.len(), 2);
-        for y in 0..self.shape[0] {
-            for x in 0..self.shape[1] {
-                if y == self.start[0] && x == self.start[1] {
-                    print!("s");
-                } else if y == self.end[0] && x == self.end[1] {
-                    print!("e");
-                } else {
-                    print!(" ");
-                }
-
-                if self.get_wall(&Wall { position : vec![y, x], axis: 1 } ) {
-                    print!("█");
-                } else {
-                    print!(" ");
-                }
-            }
-            println!("");
-
-            for x in 0..self.shape[1] {
-                if self.get_wall(&Wall { position : vec![y, x], axis: 0 } ) {
-                    print!("█");
-                } else {
-                    print!(" ");
-                }
-                print!("█");
-            }
-            println!("");
-        }
-    }
-}
-
-#[derive(PartialEq, Eq, Hash)]
-struct Wall {
-    position: Vec<usize>,
-    axis: usize,
-}
-
-impl Wall {
-    /// Get the list of walls neighbouring a cell at position.
-    pub fn from_cell(shape: &[usize], position: &[usize]) -> Vec<Wall> {
-        let mut walls = Vec::new();
-        for axis in 0..shape.len() {
-            for sign in [false, true] {
-                let mut position = position.to_vec();
-                if sign {
-                    if position[axis] != 0 {
-                        position[axis] -= 1;
-                    } else {
-                        position[axis] = shape[axis] - 1;
-                    }
-                }
-                walls.push(Wall { position, axis });
-            }
-        }
-        walls
+    pub fn start(&mut self) {
+        self.position.copy_from_slice(&self.start);
     }
 
-    /// Get the two cells neighbouring the wall.
-    pub fn get_neighbour_cells(&self, shape: &[usize]) -> [Vec<usize>; 2] {
-        let position1 = self.position.clone();
+    pub fn walk(&mut self, view_axis: usize, sign: bool) {
+        if sign {
+            if self.get_wall(&Wall { position: self.position.clone(), axis: self.axes[view_axis] }) {
+                return;
+            }
 
-        let mut position2 = self.position.clone();
-        if position2[self.axis] != shape[self.axis] - 1 {
-            position2[self.axis] += 1;
+            if self.position[self.axes[view_axis]] != self.shape[self.axes[view_axis]] - 1 {
+                self.position[self.axes[view_axis]] += 1;
+            } else {
+                self.position[self.axes[view_axis]] = 0;
+            }
         } else {
-            position2[self.axis] = 0;
+            let old_value = self.position[self.axes[view_axis]];
+
+            if self.position[self.axes[view_axis]] != 0 {
+                self.position[self.axes[view_axis]] -= 1;
+            } else {
+                self.position[self.axes[view_axis]] = self.shape[self.axes[view_axis]] - 1;
+            }
+
+            if self.get_wall(&Wall { position: self.position.clone(), axis: self.axes[view_axis] }) {
+                self.position[self.axes[view_axis]] = old_value;
+            }
+        }
+    }
+
+    pub fn render(&self) {
+        let (mut width, height) = size().unwrap();
+        width /= 2;
+
+        let mut stdout = std::io::stdout();
+
+        crossterm::queue!(&mut stdout, BeginSynchronizedUpdate).unwrap();
+        crossterm::queue!(&mut stdout, Clear(ClearType::All)).unwrap();
+        crossterm::queue!(&mut stdout, crossterm::cursor::MoveTo(0, 0)).unwrap();
+
+        for y in 0..height {
+            for x in 0..width {
+                let y = y as isize - (height / 2) as isize;
+                let x = x as isize - (width / 2) as isize;
+
+                enum RenderCell {
+                    Wall,
+                    Empty,
+                    Start,
+                    End,
+                    Current,
+                }
+
+                match match (y.rem_euclid(2), x.rem_euclid(2)) {
+                    (1, 1) => RenderCell::Wall,
+                    (ry, rx)  => {
+                        let mut position = self.position.clone();
+                        position[self.axes[0]] = (position[self.axes[0]] as isize + y.div_euclid(2)).rem_euclid(self.shape[self.axes[0]] as isize) as usize;
+                        position[self.axes[1]] = (position[self.axes[1]] as isize + x.div_euclid(2)).rem_euclid(self.shape[self.axes[1]] as isize) as usize;
+                        match (ry, rx) {
+                            (0, 0) => {
+                                if position == self.start {
+                                    RenderCell::Start
+                                } else if position == self.end {
+                                    RenderCell::End
+                                } else if position == self.position {
+                                    RenderCell::Current
+                                } else {
+                                    RenderCell::Empty
+                                }
+                            },
+                            (1, 0) => if self.get_wall(&Wall { position, axis: 0 }) { RenderCell::Wall } else { RenderCell::Empty },
+                            (0, 1) => if self.get_wall(&Wall { position, axis: 1 }) { RenderCell::Wall } else { RenderCell::Empty },
+                            _ => unreachable!(),
+                        }
+                    },
+                } {
+                    RenderCell::Wall => write!(&mut stdout, "██").unwrap(),
+                    RenderCell::Empty => write!(&mut stdout, "  ").unwrap(),
+                    RenderCell::Start => {
+                        crossterm::queue!(&mut stdout, crossterm::style::SetForegroundColor(crossterm::style::Color::Green)).unwrap();
+                        write!(&mut stdout, "██").unwrap();
+                        crossterm::queue!(&mut stdout, crossterm::style::SetForegroundColor(crossterm::style::Color::White)).unwrap();
+                    },
+                    RenderCell::End => {
+                        crossterm::queue!(&mut stdout, crossterm::style::SetForegroundColor(crossterm::style::Color::Red)).unwrap();
+                        write!(&mut stdout, "██").unwrap();
+                        crossterm::queue!(&mut stdout, crossterm::style::SetForegroundColor(crossterm::style::Color::White)).unwrap();
+                    },
+                    RenderCell::Current => {
+                        crossterm::queue!(&mut stdout, crossterm::style::SetForegroundColor(crossterm::style::Color::Yellow)).unwrap();
+                        write!(&mut stdout, "██").unwrap();
+                        crossterm::queue!(&mut stdout, crossterm::style::SetForegroundColor(crossterm::style::Color::White)).unwrap();
+                    },
+                }
+            }
+            write!(&mut stdout, "\r\n").unwrap();
         }
 
-        [position1, position2]
+        crossterm::queue!(&mut stdout, EndSynchronizedUpdate).unwrap();
+
+        stdout.flush().unwrap();
     }
 }
 
 fn main() {
-    let mut maze = Maze::new(vec![20, 60]);
+    let mut maze = Maze::new(vec![30, 30]);
     maze.generate(&mut rand::rng());
-    maze.display2d();
+    maze.start();
+
+    enable_raw_mode().unwrap();
+    crossterm::execute!(std::io::stdout(), EnterAlternateScreen).unwrap();
+
+    loop {
+        maze.render();
+        match read().unwrap() {
+            Event::Key(key_event) => match key_event {
+                KeyEvent { code : KeyCode::Up, .. } => maze.walk(0, false),
+                KeyEvent { code : KeyCode::Down, .. } => maze.walk(0, true),
+                KeyEvent { code : KeyCode::Left, .. } => maze.walk(1, false),
+                KeyEvent { code : KeyCode::Right, .. } => maze.walk(1, true),
+                KeyEvent { code : KeyCode::Char('c'), modifiers : KeyModifiers::CONTROL, .. } => break,
+                KeyEvent { code : KeyCode::Char('q'), .. } => break,
+                _ => {},
+            },
+            _ => {},
+        }
+    }
+
+    crossterm::execute!(std::io::stdout(), LeaveAlternateScreen).unwrap();
 }

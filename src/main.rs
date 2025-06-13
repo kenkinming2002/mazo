@@ -1,6 +1,8 @@
+#![feature(iterator_try_collect)]
+
 use rand::prelude::*;
 
-use ratatui::prelude::*;
+use ratatui::{prelude::*, widgets::{Block, Paragraph}};
 use layout::Position;
 use style::Color;
 
@@ -50,7 +52,7 @@ impl Wall {
 }
 
 struct Maze {
-    shape: Vec<usize>,
+    dimensions: Vec<usize>,
 
     start: Vec<usize>,
     end: Vec<usize>,
@@ -62,18 +64,18 @@ struct Maze {
 }
 
 impl Maze {
-    pub fn new(shape: Vec<usize>) -> Maze {
-        let start = vec![0; shape.len()];
-        let end = vec![0; shape.len()];
-        let position = vec![0; shape.len()];
+    pub fn new(dimensions: Vec<usize>) -> Maze {
+        let start = vec![0; dimensions.len()];
+        let end = vec![0; dimensions.len()];
+        let position = vec![0; dimensions.len()];
 
         let axes = [0, 1];
 
-        let wall_count = shape.iter().product::<usize>() * shape.len();
+        let wall_count = dimensions.iter().product::<usize>() * dimensions.len();
         let walls = vec![true; wall_count];
 
         Maze {
-            shape,
+            dimensions,
             start,
             end,
             position,
@@ -86,7 +88,7 @@ impl Maze {
         let mut index = 0;
         let mut stride = 1;
 
-        for (limit, value) in std::iter::zip(self.shape.iter(), wall.position.iter()) {
+        for (limit, value) in std::iter::zip(self.dimensions.iter(), wall.position.iter()) {
             index += stride * *value;
             stride *= *limit;
         }
@@ -110,26 +112,26 @@ impl Maze {
     }
 
     pub fn generate<R: Rng + ?Sized>(&mut self, rng: &mut R) {
-        for (limit, value) in std::iter::zip(self.shape.iter(), self.start.iter_mut()) {
+        for (limit, value) in std::iter::zip(self.dimensions.iter(), self.start.iter_mut()) {
             *value = rng.random_range(0..*limit);
         }
 
-        for (limit, value) in std::iter::zip(self.shape.iter(), self.end.iter_mut()) {
+        for (limit, value) in std::iter::zip(self.dimensions.iter(), self.end.iter_mut()) {
             *value = rng.random_range(0..*limit);
         }
 
         // Yep. This waste a lot of memory, but apparently who cares?
         let mut visited = HashSet::<Vec<usize>>::from_iter([self.start.clone()]);
-        let mut walls = Wall::from_cell(&self.shape, &self.start);
+        let mut walls = Wall::from_cell(&self.dimensions, &self.start);
 
         self.reset_walls();
         while !walls.is_empty() {
             let wall = walls.swap_remove(rng.random_range(0..walls.len()));
 
             let mut okay = false;
-            for cell in wall.get_neighbour_cells(&self.shape) {
+            for cell in wall.get_neighbour_cells(&self.dimensions) {
                 if !visited.contains(&cell) {
-                    for wall in Wall::from_cell(&self.shape, &cell) {
+                    for wall in Wall::from_cell(&self.dimensions, &cell) {
                         if self.get_wall(&wall) {
                             walls.push(wall);
                         }
@@ -155,7 +157,7 @@ impl Maze {
                 return;
             }
 
-            if self.position[self.axes[view_axis]] != self.shape[self.axes[view_axis]] - 1 {
+            if self.position[self.axes[view_axis]] != self.dimensions[self.axes[view_axis]] - 1 {
                 self.position[self.axes[view_axis]] += 1;
             } else {
                 self.position[self.axes[view_axis]] = 0;
@@ -166,7 +168,7 @@ impl Maze {
             if self.position[self.axes[view_axis]] != 0 {
                 self.position[self.axes[view_axis]] -= 1;
             } else {
-                self.position[self.axes[view_axis]] = self.shape[self.axes[view_axis]] - 1;
+                self.position[self.axes[view_axis]] = self.dimensions[self.axes[view_axis]] - 1;
             }
 
             if self.get_wall(&Wall { position: self.position.clone(), axis: self.axes[view_axis] }) {
@@ -201,8 +203,8 @@ impl Widget for &Maze {
                     (1, 1) => RenderCell::Wall,
                     (ry, rx)  => {
                         let mut position = self.position.clone();
-                        position[self.axes[0]] = (position[self.axes[0]] as isize + wy.div_euclid(2)).rem_euclid(self.shape[self.axes[0]] as isize) as usize;
-                        position[self.axes[1]] = (position[self.axes[1]] as isize + wx.div_euclid(2)).rem_euclid(self.shape[self.axes[1]] as isize) as usize;
+                        position[self.axes[0]] = (position[self.axes[0]] as isize + wy.div_euclid(2)).rem_euclid(self.dimensions[self.axes[0]] as isize) as usize;
+                        position[self.axes[1]] = (position[self.axes[1]] as isize + wx.div_euclid(2)).rem_euclid(self.dimensions[self.axes[1]] as isize) as usize;
                         match (ry, rx) {
                             (0, 0) => {
                                 if position == self.start {
@@ -247,26 +249,127 @@ impl Widget for &Maze {
     }
 }
 
-fn main() {
-    let mut maze = Maze::new(vec![30, 30]);
-    maze.generate(&mut rand::rng());
-    maze.start();
+enum Application {
+    Menu {
+        dimension: String,
+    },
+    Main {
+        maze: Maze,
+    },
+}
 
-    let mut terminal = ratatui::init();
-    loop {
-        terminal.draw(|frame| frame.render_widget(&maze, frame.area())).unwrap();
-        match read().unwrap() {
+fn parse_dimension(s: &str) -> Option<Vec<usize>> {
+    s
+        .split(',')
+        .map(|s| s.trim())
+        .map(|s| s.parse())
+        .try_collect()
+        .ok()
+}
+
+impl Application {
+    pub fn new() -> Application {
+        Self::Menu { dimension: String::new() }
+    }
+
+    pub fn run(&mut self) {
+        let mut terminal = ratatui::init();
+        loop {
+            terminal.draw(|frame| self.render(frame)).unwrap();
+            if !self.update() {
+                break
+            }
+        }
+        ratatui::restore();
+    }
+
+    pub fn render(&self, frame: &mut Frame) {
+        match self {
+            Application::Menu { dimension } => {
+                let text = if dimension.is_empty() {
+                    Text::from(" Enter dimension of maze to be generated here: (e.g. 50, 40, 30) ").style(Style::new().dark_gray())
+                } else {
+                    if parse_dimension(dimension).is_some() {
+                        Text::from(format!(" Dimension: {dimension} ")).style(Style::new().green())
+                    } else {
+                        Text::from(format!(" Dimension: {dimension} ")).style(Style::new().red())
+                    }
+                };
+
+                let desired_width = (text.width() + 2) as u16;
+                let desired_height = 3;
+
+                let mut input_area = frame.area();
+
+                if input_area.width > desired_width {
+                    input_area.x += (input_area.width - desired_width) / 2;
+                    input_area.width = desired_width;
+                }
+
+                if input_area.height > desired_height {
+                    input_area.y += (input_area.height - desired_height) / 2;
+                    input_area.height = desired_height;
+                }
+
+                let input_widget = Paragraph::new(text).block(Block::bordered());
+                frame.render_widget(input_widget, input_area);
+            },
+            Application::Main { maze } => {
+                frame.render_widget(maze, frame.area());
+            },
+        }
+    }
+
+    pub fn update(&mut self) -> bool {
+        let event = read().unwrap();
+        match event {
             Event::Key(key_event) => match key_event {
-                KeyEvent { code : KeyCode::Up, .. } => maze.walk(0, false),
-                KeyEvent { code : KeyCode::Down, .. } => maze.walk(0, true),
-                KeyEvent { code : KeyCode::Left, .. } => maze.walk(1, false),
-                KeyEvent { code : KeyCode::Right, .. } => maze.walk(1, true),
-                KeyEvent { code : KeyCode::Char('c'), modifiers : KeyModifiers::CONTROL, .. } => break,
-                KeyEvent { code : KeyCode::Char('q'), .. } => break,
+                KeyEvent { code : KeyCode::Char('c'), modifiers : KeyModifiers::CONTROL, .. } => return false,
+                KeyEvent { code : KeyCode::Char('q'), .. } => return false,
                 _ => {},
             },
             _ => {},
+        };
+
+        match self {
+            Application::Menu { dimension } => {
+                match event {
+                    Event::Key(key_event) => match key_event {
+                        KeyEvent { code : KeyCode::Char(c), .. } => { dimension.push(c); },
+                        KeyEvent { code : KeyCode::Esc, .. } => { dimension.clear(); },
+                        KeyEvent { code : KeyCode::Backspace, .. } => { dimension.pop(); },
+                        KeyEvent { code : KeyCode::Enter, .. } => {
+                            if let Some(dimension) = parse_dimension(dimension) {
+                                let mut maze = Maze::new(dimension);
+                                maze.generate(&mut rand::rng());
+                                maze.start();
+                                *self = Application::Main { maze }
+                            }
+                        },
+                        _ => {},
+                    },
+                    _ => {},
+                }
+            },
+            Application::Main { maze } => {
+                match event {
+                    Event::Key(key_event) => match key_event {
+                        KeyEvent { code : KeyCode::Esc, .. } => *self = Application::new(),
+                        KeyEvent { code : KeyCode::Up, .. } => maze.walk(0, false),
+                        KeyEvent { code : KeyCode::Down, .. } => maze.walk(0, true),
+                        KeyEvent { code : KeyCode::Left, .. } => maze.walk(1, false),
+                        KeyEvent { code : KeyCode::Right, .. } => maze.walk(1, true),
+                        _ => {},
+                    },
+                    _ => {},
+                }
+            },
         }
+
+        true
     }
-    ratatui::restore();
+}
+
+fn main() {
+    Application::new().run()
 }

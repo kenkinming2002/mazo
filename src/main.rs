@@ -176,6 +176,12 @@ impl Maze {
             }
         }
     }
+
+    pub fn set_view_axis(&mut self, view_axis: usize, axis : usize) {
+        if view_axis < 2 && axis < self.dimensions.len() {
+            self.axes[view_axis] = axis;
+        }
+    }
 }
 
 impl Widget for &Maze {
@@ -217,8 +223,8 @@ impl Widget for &Maze {
                                     RenderCell::Empty
                                 }
                             },
-                            (1, 0) => if self.get_wall(&Wall { position, axis: 0 }) { RenderCell::Wall } else { RenderCell::Empty },
-                            (0, 1) => if self.get_wall(&Wall { position, axis: 1 }) { RenderCell::Wall } else { RenderCell::Empty },
+                            (1, 0) => if self.get_wall(&Wall { position, axis: self.axes[0] }) { RenderCell::Wall } else { RenderCell::Empty },
+                            (0, 1) => if self.get_wall(&Wall { position, axis: self.axes[1] }) { RenderCell::Wall } else { RenderCell::Empty },
                             _ => unreachable!(),
                         }
                     },
@@ -255,6 +261,7 @@ enum Application {
     },
     Main {
         maze: Maze,
+        view_axis : Option<usize>,
     },
 }
 
@@ -314,8 +321,112 @@ impl Application {
                 let input_widget = Paragraph::new(text).block(Block::bordered());
                 frame.render_widget(input_widget, input_area);
             },
-            Application::Main { maze } => {
-                frame.render_widget(maze, frame.area());
+            Application::Main { maze, view_axis } => {
+                let mut info = Text::default();
+
+                {
+                    let mut line = Line::default();
+                    line.push_span("Current Axes (Vertical, Horizontal): ");
+
+                    let mut span = Span::raw(format!("{}", maze.axes[0]));
+                    if *view_axis == Some(0) { span = span.style(Style::new().red()); }
+                    line.push_span(span);
+
+                    line.push_span(" ");
+
+                    let mut span = Span::raw(format!("{}", maze.axes[1]));
+                    if *view_axis == Some(1) { span = span.style(Style::new().red()); }
+                    line.push_span(span);
+
+                    info.push_line(line);
+                }
+
+                {
+                    let mut line = Line::default();
+                    line.push_span("Dimensions: ");
+                    for (i, dimension) in maze.dimensions.iter().enumerate() {
+                        if i != 0 { line.push_span(", "); }
+                        line.push_span(dimension.to_string());
+                    }
+                    info.push_line(line);
+                }
+
+                {
+                    let mut line = Line::default();
+                    line.push_span("Position: ");
+                    for (i, dimension) in maze.position.iter().enumerate() {
+                        if i != 0 { line.push_span(", "); }
+                        line.push_span(dimension.to_string());
+                    }
+                    info.push_line(line);
+                }
+
+                {
+                    let mut line = Line::default();
+                    line.push_span("Start: ");
+                    for (i, dimension) in maze.start.iter().enumerate() {
+                        if i != 0 { line.push_span(", "); }
+                        line.push_span(dimension.to_string());
+                    }
+                    info.push_line(line);
+                }
+
+                {
+                    let mut line = Line::default();
+                    line.push_span("End: ");
+                    for (i, dimension) in maze.end.iter().enumerate() {
+                        if i != 0 { line.push_span(", "); }
+                        line.push_span(dimension.to_string());
+                    }
+                    info.push_line(line);
+                }
+
+                let mut help = Text::default();
+
+                match view_axis {
+                    Some(_) => {
+                        let mut line = Line::default();
+                        line.push_span(format!("0-{}: Select replacement axis", maze.dimensions.len()-1));
+                        help.push_line(line);
+
+                        let mut line = Line::default();
+                        line.push_span("Esc: Cancel selection of replacment axis");
+                        help.push_line(line);
+
+                    },
+                    None => {
+                        let mut line = Line::default();
+                        line.push_span("0-1: Select which axes to modify");
+                        help.push_line(line);
+
+                        let mut line = Line::default();
+                        line.push_span("Esc: exit");
+                        help.push_line(line);
+                    },
+                }
+
+                {
+                    let mut line = Line::default();
+                    line.push_span("Arrow Keys: Move");
+                    help.push_line(line);
+                }
+
+                let [info_area, help_area, maze_area] = Layout::vertical([
+                    Constraint::Length((info.lines.len()+2).try_into().unwrap()),
+                    Constraint::Length((help.lines.len()+2).try_into().unwrap()),
+                    Constraint::Min(0),
+                ]).areas(frame.area());
+
+                let info_block = Block::bordered().title("Info");
+                let help_block = Block::bordered().title("Help");
+
+                frame.render_widget(&info_block, info_area);
+                frame.render_widget(&info, info_block.inner(info_area));
+
+                frame.render_widget(&help_block, help_area);
+                frame.render_widget(&help, help_block.inner(help_area));
+
+                frame.render_widget(maze, maze_area);
             },
         }
     }
@@ -343,7 +454,7 @@ impl Application {
                                 let mut maze = Maze::new(dimension);
                                 maze.generate(&mut rand::rng());
                                 maze.start();
-                                *self = Application::Main { maze }
+                                *self = Application::Main { maze, view_axis : None }
                             }
                         },
                         _ => {},
@@ -351,14 +462,30 @@ impl Application {
                     _ => {},
                 }
             },
-            Application::Main { maze } => {
+            Application::Main { maze, view_axis } => {
                 match event {
                     Event::Key(key_event) => match key_event {
-                        KeyEvent { code : KeyCode::Esc, .. } => *self = Application::new(),
                         KeyEvent { code : KeyCode::Up, .. } => maze.walk(0, false),
                         KeyEvent { code : KeyCode::Down, .. } => maze.walk(0, true),
                         KeyEvent { code : KeyCode::Left, .. } => maze.walk(1, false),
                         KeyEvent { code : KeyCode::Right, .. } => maze.walk(1, true),
+
+                        KeyEvent { code : KeyCode::Esc, .. } => {
+                            match view_axis {
+                                Some(_) => *view_axis = None,
+                                None => *self = Application::new(),
+                            }
+                        },
+
+                        KeyEvent { code : KeyCode::Char(c), .. } if c >= '0' && c <= '9' => {
+                            let d = c as usize - '0' as usize;
+                            match view_axis.take() {
+                                Some(view_axis) => maze.set_view_axis(view_axis, d),
+                                None => *view_axis = Some(d),
+                            }
+
+                        },
+
                         _ => {},
                     },
                     _ => {},

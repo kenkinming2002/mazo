@@ -1,10 +1,12 @@
 use rand::prelude::*;
 
-use std::io::prelude::*;
+use ratatui::prelude::*;
+use layout::Position;
+use style::Color;
+
 use std::collections::HashSet;
 
 use crossterm::event::*;
-use crossterm::terminal::*;
 
 #[derive(PartialEq, Eq, Hash)]
 struct Wall {
@@ -172,21 +174,20 @@ impl Maze {
             }
         }
     }
+}
 
-    pub fn render(&self) {
-        let (mut width, height) = size().unwrap();
-        width /= 2;
-
-        let mut stdout = std::io::stdout();
-
-        crossterm::queue!(&mut stdout, BeginSynchronizedUpdate).unwrap();
-        crossterm::queue!(&mut stdout, Clear(ClearType::All)).unwrap();
-        crossterm::queue!(&mut stdout, crossterm::cursor::MoveTo(0, 0)).unwrap();
+impl Widget for &Maze {
+    fn render(self, area: Rect, buf: &mut Buffer)
+    where
+        Self: Sized
+    {
+        let height = area.height;
+        let width = area.width / 2;
 
         for y in 0..height {
             for x in 0..width {
-                let y = y as isize - (height / 2) as isize;
-                let x = x as isize - (width / 2) as isize;
+                let wy = y as isize - (height / 2) as isize;
+                let wx = x as isize - (width / 2) as isize;
 
                 enum RenderCell {
                     Wall,
@@ -196,12 +197,12 @@ impl Maze {
                     Current,
                 }
 
-                match match (y.rem_euclid(2), x.rem_euclid(2)) {
+                match match (wy.rem_euclid(2), wx.rem_euclid(2)) {
                     (1, 1) => RenderCell::Wall,
                     (ry, rx)  => {
                         let mut position = self.position.clone();
-                        position[self.axes[0]] = (position[self.axes[0]] as isize + y.div_euclid(2)).rem_euclid(self.shape[self.axes[0]] as isize) as usize;
-                        position[self.axes[1]] = (position[self.axes[1]] as isize + x.div_euclid(2)).rem_euclid(self.shape[self.axes[1]] as isize) as usize;
+                        position[self.axes[0]] = (position[self.axes[0]] as isize + wy.div_euclid(2)).rem_euclid(self.shape[self.axes[0]] as isize) as usize;
+                        position[self.axes[1]] = (position[self.axes[1]] as isize + wx.div_euclid(2)).rem_euclid(self.shape[self.axes[1]] as isize) as usize;
                         match (ry, rx) {
                             (0, 0) => {
                                 if position == self.start {
@@ -220,31 +221,29 @@ impl Maze {
                         }
                     },
                 } {
-                    RenderCell::Wall => write!(&mut stdout, "██").unwrap(),
-                    RenderCell::Empty => write!(&mut stdout, "  ").unwrap(),
+                    RenderCell::Wall => {
+                        buf[Position { x: area.x + x * 2 + 0, y : area.y + y }].set_char('█');
+                        buf[Position { x: area.x + x * 2 + 1, y : area.y + y }].set_char('█');
+                    },
+                    RenderCell::Empty => {
+                        buf[Position { x: area.x + x * 2 + 0, y : area.y + y }].set_char(' ');
+                        buf[Position { x: area.x + x * 2 + 1, y : area.y + y }].set_char(' ');
+                    },
                     RenderCell::Start => {
-                        crossterm::queue!(&mut stdout, crossterm::style::SetForegroundColor(crossterm::style::Color::Green)).unwrap();
-                        write!(&mut stdout, "██").unwrap();
-                        crossterm::queue!(&mut stdout, crossterm::style::SetForegroundColor(crossterm::style::Color::White)).unwrap();
+                        buf[Position { x: area.x + x * 2 + 0, y : area.y + y }].set_char('█').set_fg(Color::Green);
+                        buf[Position { x: area.x + x * 2 + 1, y : area.y + y }].set_char('█').set_fg(Color::Green);
                     },
                     RenderCell::End => {
-                        crossterm::queue!(&mut stdout, crossterm::style::SetForegroundColor(crossterm::style::Color::Red)).unwrap();
-                        write!(&mut stdout, "██").unwrap();
-                        crossterm::queue!(&mut stdout, crossterm::style::SetForegroundColor(crossterm::style::Color::White)).unwrap();
+                        buf[Position { x: area.x + x * 2 + 0, y : area.y + y }].set_char('█').set_fg(Color::Red);
+                        buf[Position { x: area.x + x * 2 + 1, y : area.y + y }].set_char('█').set_fg(Color::Red);
                     },
                     RenderCell::Current => {
-                        crossterm::queue!(&mut stdout, crossterm::style::SetForegroundColor(crossterm::style::Color::Yellow)).unwrap();
-                        write!(&mut stdout, "██").unwrap();
-                        crossterm::queue!(&mut stdout, crossterm::style::SetForegroundColor(crossterm::style::Color::White)).unwrap();
+                        buf[Position { x: area.x + x * 2 + 0, y : area.y + y }].set_char('█').set_fg(Color::Yellow);
+                        buf[Position { x: area.x + x * 2 + 1, y : area.y + y }].set_char('█').set_fg(Color::Yellow);
                     },
                 }
             }
-            write!(&mut stdout, "\r\n").unwrap();
         }
-
-        crossterm::queue!(&mut stdout, EndSynchronizedUpdate).unwrap();
-
-        stdout.flush().unwrap();
     }
 }
 
@@ -253,11 +252,9 @@ fn main() {
     maze.generate(&mut rand::rng());
     maze.start();
 
-    enable_raw_mode().unwrap();
-    crossterm::execute!(std::io::stdout(), EnterAlternateScreen).unwrap();
-
+    let mut terminal = ratatui::init();
     loop {
-        maze.render();
+        terminal.draw(|frame| frame.render_widget(&maze, frame.area())).unwrap();
         match read().unwrap() {
             Event::Key(key_event) => match key_event {
                 KeyEvent { code : KeyCode::Up, .. } => maze.walk(0, false),
@@ -271,6 +268,5 @@ fn main() {
             _ => {},
         }
     }
-
-    crossterm::execute!(std::io::stdout(), LeaveAlternateScreen).unwrap();
+    ratatui::restore();
 }

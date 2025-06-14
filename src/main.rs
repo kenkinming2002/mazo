@@ -1,14 +1,18 @@
 #![feature(iterator_try_collect)]
 
+pub mod binary_heap;
+
 use rand::prelude::*;
 
 use ratatui::{prelude::*, widgets::{Block, Paragraph}};
 use layout::Position;
 use style::Color;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crossterm::event::*;
+
+use crate::binary_heap::{BinaryHashHeap, BinaryHashHeapItem, PushAction};
 
 #[derive(PartialEq, Eq, Hash)]
 struct Wall {
@@ -97,6 +101,45 @@ impl Maze {
         index
     }
 
+    /// Travel one square in the given axis in either positive or negative direction depending on
+    /// given sign, wrapping around if necessary.
+    pub fn traverse_inplace(&self, position: &mut [usize], axis: usize, sign: bool) {
+        if sign {
+            if position[axis] != self.dimensions[axis] - 1 {
+                position[axis] += 1;
+            } else {
+                position[axis] = 0;
+            }
+        } else {
+            if position[axis] != 0 {
+                position[axis] -= 1;
+            } else {
+                position[axis] = self.dimensions[axis] - 1;
+            }
+        }
+    }
+
+    /// Travel one square in the given axis in either positive or negative direction depending on
+    /// given sign, wrapping around if necessary.
+    pub fn traverse(&self, position: &[usize], axis: usize, sign: bool) -> Vec<usize> {
+        let mut result = position.to_vec();
+        self.traverse_inplace(&mut result, axis, sign);
+        result
+    }
+
+    /// Get the list of walls neighbouring a cell at position, together with the other cell.
+    pub fn neighbours(&self, position: &[usize]) -> Vec<(Wall, Vec<usize>)> {
+        let mut result = Vec::new();
+        for axis in 0..self.dimensions.len() {
+            for sign in [false, true] {
+                let neighbour_position = self.traverse(position, axis, sign);
+                let wall_position = if sign { position.to_vec() } else { neighbour_position.clone() };
+                result.push((Wall { position: wall_position, axis, }, neighbour_position));
+            }
+        }
+        result
+    }
+
     pub fn reset_walls(&mut self) {
         self.walls.fill(true);
     }
@@ -147,6 +190,89 @@ impl Maze {
         }
     }
 
+    /// Compute the taxicab distance between two positions but take into account the fact that we
+    /// are on a torus.
+    fn distance(&self, position1: &[usize], position2: &[usize]) -> usize {
+        let mut result : usize = 0;
+        for (i, dimension) in self.dimensions.iter().enumerate() {
+            result += (position1[i] as isize - position2[i] as isize).div_euclid(*dimension as isize) as usize;
+        }
+        result
+    }
+
+    pub fn solve(&mut self) -> Vec<Vec<usize>> {
+        #[derive(Debug)]
+        struct Node {
+            g_score: usize,
+            f_score: usize,
+            position: Vec<usize>,
+        }
+
+        impl BinaryHashHeapItem for Node {
+            type Key = Vec<usize>;
+            type Value = usize;
+
+            fn key(&self) -> &Self::Key {
+                &self.position
+            }
+
+            fn value(&self) -> &Self::Value {
+                &self.f_score
+            }
+        }
+
+        let mut open = BinaryHashHeap::default();
+        open.push(PushAction::Keep, Node {
+            position: self.start.clone(),
+            g_score: 0,
+            f_score: self.distance(&self.start, &self.end)
+        });
+
+        let mut visited = HashSet::new();
+        let mut links = HashMap::new();
+
+        while let Some(node) = open.pop() {
+            if node.position == self.end {
+                let mut paths = Vec::new();
+
+                let mut current = self.end.clone();
+                while current != self.start {
+                    let next = links.remove(&current).unwrap();
+                    paths.push(current);
+                    current = next;
+                }
+
+                paths.push(current);
+                return paths;
+            }
+
+            for (wall, neighbour_position) in self.neighbours(&node.position) {
+                if visited.contains(&neighbour_position) {
+                    continue;
+                }
+
+                if self.get_wall(&wall) {
+                    continue;
+                }
+
+                let g_score = node.g_score + 1;
+                let f_score = g_score + self.distance(&neighbour_position, &self.end);
+                if !open.push(PushAction::DecreaseKey, Node {
+                    position: neighbour_position.clone(),
+                    g_score, f_score,
+                }) {
+                    continue;
+                }
+
+                links.insert(neighbour_position, node.position.clone());
+            }
+
+            visited.insert(node.position);
+        }
+
+        panic!("No path found")
+    }
+
     pub fn start(&mut self) {
         self.position.copy_from_slice(&self.start);
     }
@@ -184,77 +310,6 @@ impl Maze {
     }
 }
 
-impl Widget for &Maze {
-    fn render(self, area: Rect, buf: &mut Buffer)
-    where
-        Self: Sized
-    {
-        let height = area.height;
-        let width = area.width / 2;
-
-        for y in 0..height {
-            for x in 0..width {
-                let wy = y as isize - (height / 2) as isize;
-                let wx = x as isize - (width / 2) as isize;
-
-                enum RenderCell {
-                    Wall,
-                    Empty,
-                    Start,
-                    End,
-                    Current,
-                }
-
-                match match (wy.rem_euclid(2), wx.rem_euclid(2)) {
-                    (1, 1) => RenderCell::Wall,
-                    (ry, rx)  => {
-                        let mut position = self.position.clone();
-                        position[self.axes[0]] = (position[self.axes[0]] as isize + wy.div_euclid(2)).rem_euclid(self.dimensions[self.axes[0]] as isize) as usize;
-                        position[self.axes[1]] = (position[self.axes[1]] as isize + wx.div_euclid(2)).rem_euclid(self.dimensions[self.axes[1]] as isize) as usize;
-                        match (ry, rx) {
-                            (0, 0) => {
-                                if position == self.start {
-                                    RenderCell::Start
-                                } else if position == self.end {
-                                    RenderCell::End
-                                } else if position == self.position {
-                                    RenderCell::Current
-                                } else {
-                                    RenderCell::Empty
-                                }
-                            },
-                            (1, 0) => if self.get_wall(&Wall { position, axis: self.axes[0] }) { RenderCell::Wall } else { RenderCell::Empty },
-                            (0, 1) => if self.get_wall(&Wall { position, axis: self.axes[1] }) { RenderCell::Wall } else { RenderCell::Empty },
-                            _ => unreachable!(),
-                        }
-                    },
-                } {
-                    RenderCell::Wall => {
-                        buf[Position { x: area.x + x * 2 + 0, y : area.y + y }].set_char('█');
-                        buf[Position { x: area.x + x * 2 + 1, y : area.y + y }].set_char('█');
-                    },
-                    RenderCell::Empty => {
-                        buf[Position { x: area.x + x * 2 + 0, y : area.y + y }].set_char(' ');
-                        buf[Position { x: area.x + x * 2 + 1, y : area.y + y }].set_char(' ');
-                    },
-                    RenderCell::Start => {
-                        buf[Position { x: area.x + x * 2 + 0, y : area.y + y }].set_char('█').set_fg(Color::Green);
-                        buf[Position { x: area.x + x * 2 + 1, y : area.y + y }].set_char('█').set_fg(Color::Green);
-                    },
-                    RenderCell::End => {
-                        buf[Position { x: area.x + x * 2 + 0, y : area.y + y }].set_char('█').set_fg(Color::Red);
-                        buf[Position { x: area.x + x * 2 + 1, y : area.y + y }].set_char('█').set_fg(Color::Red);
-                    },
-                    RenderCell::Current => {
-                        buf[Position { x: area.x + x * 2 + 0, y : area.y + y }].set_char('█').set_fg(Color::Yellow);
-                        buf[Position { x: area.x + x * 2 + 1, y : area.y + y }].set_char('█').set_fg(Color::Yellow);
-                    },
-                }
-            }
-        }
-    }
-}
-
 enum Application {
     Menu {
         dimension: String,
@@ -262,7 +317,88 @@ enum Application {
     Main {
         maze: Maze,
         view_axis : Option<usize>,
+        solution: Option<Vec<Vec<usize>>>,
     },
+}
+
+fn render_maze(area: Rect, buf: &mut Buffer, maze: &Maze, solution: Option<&Vec<Vec<usize>>>) {
+    let height = area.height;
+    let width = area.width / 2;
+
+    let solution = solution
+        .iter()
+        .copied()
+        .flatten()
+        .cloned()
+        .collect::<HashSet<_>>();
+
+    for y in 0..height {
+        for x in 0..width {
+            let wy = y as isize - (height / 2) as isize;
+            let wx = x as isize - (width / 2) as isize;
+
+            enum RenderCell {
+                Wall,
+                Empty,
+                Start,
+                End,
+                Current,
+                Solution,
+            }
+
+            match match (wy.rem_euclid(2), wx.rem_euclid(2)) {
+                (1, 1) => RenderCell::Wall,
+                (ry, rx)  => {
+                    let mut position = maze.position.clone();
+                    position[maze.axes[0]] = (position[maze.axes[0]] as isize + wy.div_euclid(2)).rem_euclid(maze.dimensions[maze.axes[0]] as isize) as usize;
+                    position[maze.axes[1]] = (position[maze.axes[1]] as isize + wx.div_euclid(2)).rem_euclid(maze.dimensions[maze.axes[1]] as isize) as usize;
+                    match (ry, rx) {
+                        (0, 0) => {
+                            if position == maze.start {
+                                RenderCell::Start
+                            } else if position == maze.end {
+                                RenderCell::End
+                            } else if position == maze.position {
+                                RenderCell::Current
+                            } else if solution.contains(&position) {
+                                RenderCell::Solution
+                            } else {
+                                RenderCell::Empty
+                            }
+                        },
+                        (1, 0) => if maze.get_wall(&Wall { position, axis: maze.axes[0] }) { RenderCell::Wall } else { RenderCell::Empty },
+                        (0, 1) => if maze.get_wall(&Wall { position, axis: maze.axes[1] }) { RenderCell::Wall } else { RenderCell::Empty },
+                        _ => unreachable!(),
+                    }
+                },
+            } {
+                RenderCell::Wall => {
+                    buf[Position { x: area.x + x * 2 + 0, y : area.y + y }].set_char('█');
+                    buf[Position { x: area.x + x * 2 + 1, y : area.y + y }].set_char('█');
+                },
+                RenderCell::Empty => {
+                    buf[Position { x: area.x + x * 2 + 0, y : area.y + y }].set_char(' ');
+                    buf[Position { x: area.x + x * 2 + 1, y : area.y + y }].set_char(' ');
+                },
+                RenderCell::Start => {
+                    buf[Position { x: area.x + x * 2 + 0, y : area.y + y }].set_char('█').set_fg(Color::Green);
+                    buf[Position { x: area.x + x * 2 + 1, y : area.y + y }].set_char('█').set_fg(Color::Green);
+                },
+                RenderCell::End => {
+                    buf[Position { x: area.x + x * 2 + 0, y : area.y + y }].set_char('█').set_fg(Color::Red);
+                    buf[Position { x: area.x + x * 2 + 1, y : area.y + y }].set_char('█').set_fg(Color::Red);
+                },
+                RenderCell::Current => {
+                    buf[Position { x: area.x + x * 2 + 0, y : area.y + y }].set_char('█').set_fg(Color::Yellow);
+                    buf[Position { x: area.x + x * 2 + 1, y : area.y + y }].set_char('█').set_fg(Color::Yellow);
+                },
+                RenderCell::Solution => {
+                    buf[Position { x: area.x + x * 2 + 0, y : area.y + y }].set_char('█').set_fg(Color::Cyan);
+                    buf[Position { x: area.x + x * 2 + 1, y : area.y + y }].set_char('█').set_fg(Color::Cyan);
+                },
+            }
+        }
+    }
 }
 
 fn parse_dimension(s: &str) -> Option<Vec<usize>> {
@@ -321,7 +457,7 @@ impl Application {
                 let input_widget = Paragraph::new(text).block(Block::bordered());
                 frame.render_widget(input_widget, input_area);
             },
-            Application::Main { maze, view_axis } => {
+            Application::Main { maze, view_axis, solution } => {
                 let mut info = Text::default();
 
                 {
@@ -426,7 +562,7 @@ impl Application {
                 frame.render_widget(&help_block, help_area);
                 frame.render_widget(&help, help_block.inner(help_area));
 
-                frame.render_widget(maze, maze_area);
+                render_maze(maze_area, frame.buffer_mut(), maze, solution.as_ref());
             },
         }
     }
@@ -454,7 +590,7 @@ impl Application {
                                 let mut maze = Maze::new(dimension);
                                 maze.generate(&mut rand::rng());
                                 maze.start();
-                                *self = Application::Main { maze, view_axis : None }
+                                *self = Application::Main { maze, view_axis : None, solution: None }
                             }
                         },
                         _ => {},
@@ -462,7 +598,7 @@ impl Application {
                     _ => {},
                 }
             },
-            Application::Main { maze, view_axis } => {
+            Application::Main { maze, view_axis, solution } => {
                 match event {
                     Event::Key(key_event) => match key_event {
                         KeyEvent { code : KeyCode::Up, .. } => maze.walk(0, false),
@@ -483,7 +619,12 @@ impl Application {
                                 Some(view_axis) => maze.set_view_axis(view_axis, d),
                                 None => *view_axis = Some(d),
                             }
+                        },
 
+                        KeyEvent { code : KeyCode::Char('s'), .. } => {
+                            if solution.take().is_none() {
+                                *solution = Some(maze.solve());
+                            }
                         },
 
                         _ => {},

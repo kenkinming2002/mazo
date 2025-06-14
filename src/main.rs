@@ -541,6 +541,19 @@ impl Application {
                     },
                 }
 
+                match solution {
+                    Some(_) => {
+                        let mut line = Line::default();
+                        line.push_span("s: Unsolve maze");
+                        help.push_line(line);
+                    },
+                    None => {
+                        let mut line = Line::default();
+                        line.push_span("s: Solve maze");
+                        help.push_line(line);
+                    },
+                }
+
                 {
                     let mut line = Line::default();
                     line.push_span("Arrow Keys: Move");

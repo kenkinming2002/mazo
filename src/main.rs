@@ -243,6 +243,7 @@ impl Maze {
                 }
 
                 paths.push(current);
+                paths.reverse();
                 return paths;
             }
 
@@ -330,7 +331,9 @@ fn render_maze(area: Rect, buf: &mut Buffer, maze: &Maze, solution: Option<&Vec<
         .copied()
         .flatten()
         .cloned()
-        .collect::<HashSet<_>>();
+        .enumerate()
+        .map(|(i, p)| (p, (i % 100) as u8) )
+        .collect::<HashMap<_, _>>();
 
     for y in 0..height {
         for x in 0..width {
@@ -343,7 +346,7 @@ fn render_maze(area: Rect, buf: &mut Buffer, maze: &Maze, solution: Option<&Vec<
                 Start,
                 End,
                 Current,
-                Solution,
+                Solution(u8),
             }
 
             match match (wy.rem_euclid(2), wx.rem_euclid(2)) {
@@ -360,8 +363,8 @@ fn render_maze(area: Rect, buf: &mut Buffer, maze: &Maze, solution: Option<&Vec<
                                 RenderCell::End
                             } else if position == maze.position {
                                 RenderCell::Current
-                            } else if solution.contains(&position) {
-                                RenderCell::Solution
+                            } else if let Some(i) = solution.get(&position) {
+                                RenderCell::Solution(*i)
                             } else {
                                 RenderCell::Empty
                             }
@@ -392,9 +395,9 @@ fn render_maze(area: Rect, buf: &mut Buffer, maze: &Maze, solution: Option<&Vec<
                     buf[Position { x: area.x + x * 2 + 0, y : area.y + y }].set_char('█').set_fg(Color::Yellow);
                     buf[Position { x: area.x + x * 2 + 1, y : area.y + y }].set_char('█').set_fg(Color::Yellow);
                 },
-                RenderCell::Solution => {
-                    buf[Position { x: area.x + x * 2 + 0, y : area.y + y }].set_char('█').set_fg(Color::Cyan);
-                    buf[Position { x: area.x + x * 2 + 1, y : area.y + y }].set_char('█').set_fg(Color::Cyan);
+                RenderCell::Solution(i) => {
+                    buf[Position { x: area.x + x * 2 + 0, y : area.y + y }].set_char(char::from_digit((i / 10) as u32, 10).unwrap()).set_fg(Color::Cyan);
+                    buf[Position { x: area.x + x * 2 + 1, y : area.y + y }].set_char(char::from_digit((i % 10) as u32, 10).unwrap()).set_fg(Color::Cyan);
                 },
             }
         }
